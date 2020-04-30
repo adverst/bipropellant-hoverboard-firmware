@@ -51,6 +51,7 @@
   #define READ_SENSOR
   #define CONTROL_SENSOR
   #define SOFTWARE_SERIAL
+  #define SOFTWATCHDOG_TIMEOUT -1   // Disable Watchdog, uses the same timer as SOFTWARE_SERIAL
   #define SOFTWARE_SERIAL_RX_PIN GPIO_PIN_2
   #define SOFTWARE_SERIAL_RX_PORT GPIOB
   #define SOFTWARE_SERIAL_TX_PIN GPIO_PIN_9
@@ -80,6 +81,7 @@
   #define READ_SENSOR
   #define CONTROL_SENSOR
   #define SOFTWARE_SERIAL
+  #define SOFTWATCHDOG_TIMEOUT -1   // Disable Watchdog, uses the same timer as SOFTWARE_SERIAL
   #define SOFTWARE_SERIAL_RX_PIN GPIO_PIN_2
   #define SOFTWARE_SERIAL_RX_PORT GPIOB
   #define SOFTWARE_SERIAL_TX_PIN GPIO_PIN_9
@@ -108,6 +110,7 @@
   // which are actually USART pins!
   #define INCLUDE_PROTOCOL INCLUDE_PROTOCOL2
   #define SOFTWARE_SERIAL
+  #define SOFTWATCHDOG_TIMEOUT -1   // Disable Watchdog, uses the same timer as SOFTWARE_SERIAL
   #define SOFTWARE_SERIAL_RX_PIN GPIO_PIN_2    // PB10/USART3_TX Pin29      PA2/USART2_TX/ADC123_IN2  Pin16
   #define SOFTWARE_SERIAL_RX_PORT GPIOA
   #define SOFTWARE_SERIAL_TX_PIN GPIO_PIN_3    // PB11/USART3_RX Pin30      PA3/USART2_RX/ADC123_IN3  Pin17
@@ -122,7 +125,11 @@
   // and control is via USART2
   #define INCLUDE_PROTOCOL INCLUDE_PROTOCOL2
   #define SERIAL_USART2_IT
-  #define PASE_ADV_ENA 0
+  #define PHASE_ADV_ENA      0
+  #define INVERT_R_DIRECTION 0
+  #define INVERT_L_DIRECTION 0
+  #define SWITCH_WHEELS      1
+  #define WHEEL_SIZE_INCHES 10
 #endif
 
 
@@ -132,7 +139,7 @@
   // and control is via USART3
   #define INCLUDE_PROTOCOL INCLUDE_PROTOCOL2
   #define SERIAL_USART3_IT
-  #define PASE_ADV_ENA 0
+  #define PHASE_ADV_ENA 0
 #endif
 
 
@@ -145,6 +152,12 @@
 #ifndef FLASH_STORAGE
   #define FLASH_STORAGE 1
 #endif
+
+#ifndef FLASH_DEFAULT_HOVERBOARD_ENABLE
+  #define FLASH_DEFAULT_HOVERBOARD_ENABLE 0
+#endif
+
+#define CURRENT_MAGIC 1238
 
 // ############################### ENABLE INTERRUPT READING OF HALL SENSORS FOR POSITION ###############################
 #ifndef HALL_INTERRUPTS
@@ -217,8 +230,16 @@
 #endif
 
 #ifndef INPUT_TIMEOUT
-  #define INPUT_TIMEOUT    30         // number of wrong / missing input commands before wheels are disabled
+  #define INPUT_TIMEOUT    60         // number of wrong / missing input commands before wheels are disabled
 #endif
+
+#ifndef SOFTWATCHDOG_TIMEOUT
+  #define SOFTWATCHDOG_TIMEOUT 10     // Watchdog, Monitors main loop. Stops motors and shuts down when not called after xx ms.
+#endif
+#if (SOFTWATCHDOG_TIMEOUT == -1)       // No watchdog when value is -1
+  #undef SOFTWATCHDOG_TIMEOUT
+#endif
+
 // ############################### GENERAL ###############################
 
 // ############################### MOTOR CONTROL (overwrite) #########################
@@ -230,11 +251,11 @@
 #endif
 // note: these two are now set from main based on 80/70 being (maybe) ok at 8khz
 #ifndef COMM_DEACV_HI
-  #define COMM_DEACV_HI          30   // [rpm] Commutation method deactivation speed high (above this value the control switches from Commutation method to Selected method above)
+  #define COMM_DEACV_HI          60   // [rpm] Commutation method deactivation speed high (above this value the control switches from Commutation method to Selected method above)
 #endif
 
 #ifndef COMM_ACV_LO
-  #define COMM_ACV_LO            15   // [rpm] Commutation method activation speed low
+  #define COMM_ACV_LO            30   // [rpm] Commutation method activation speed low
 #endif
 
 // How to calibrate: connect GND and RX of a 3.3v uart-usb adapter to the right sensor board cable (be careful not to use the red wire of the cable. 15v will destroye verything.). if you are using nunchuck, disable it temporarily. enable DEBUG_SERIAL_USART3 and DEBUG_SERIAL_ASCII use asearial terminal.
@@ -299,7 +320,7 @@
 #endif
 
 #ifndef INACTIVITY_TIMEOUT
-  #define INACTIVITY_TIMEOUT 8        // minutes of not driving until poweroff. it is not very precise.
+  #define INACTIVITY_TIMEOUT 80        // minutes of not driving until poweroff. it is not very precise.
 #endif
 
 // ############################### SERIAL DEBUG ###############################
@@ -382,6 +403,14 @@
 
 #ifndef ADC_REVERSE_STEER
   #define ADC_REVERSE_STEER 1         // define if ADC1 is used for Steer and ADC2 for Speed
+#endif
+
+#ifndef ADC_SQUARED_STEER
+  #define ADC_SQUARED_STEER 0         // define if Steering be not be linear but squared
+#endif
+
+#ifndef ADC_RELATIVE_STEER
+  #define ADC_RELATIVE_STEER 0.0f     // define if Steering should be relative to speed
 #endif
 
 #ifndef ADC_TANKMODE

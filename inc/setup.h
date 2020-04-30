@@ -22,6 +22,7 @@
 #pragma once
 
 #include "stm32f1xx_hal.h"
+#include "config.h"
 
 void MX_GPIO_Init(void);
 void MX_TIM_Init(void);
@@ -33,3 +34,9 @@ void USART3_IT_init();
 
 void setUSART2ToControl();
 extern int USART2ProtocolEnable;
+
+
+#ifdef SOFTWATCHDOG_TIMEOUT
+  void MX_TIM3_Softwatchdog_Init(void);
+  extern TIM_HandleTypeDef htim3;
+#endif

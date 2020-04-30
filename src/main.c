@@ -38,6 +38,8 @@
 #include "control_structures.h"
 
 #include <string.h>
+#include <stdlib.h>
+#include <math.h>
 void BldcController_Init();
 
 void SystemClock_Config(void);
@@ -51,13 +53,15 @@ extern I2C_HandleTypeDef hi2c2;
 extern UART_HandleTypeDef huart2;
 
 extern volatile int64_t bldc_counter;
-int cmd1, cmd1_ADC, adcrFiltered;  // normalized input values. -1000 to 1000
-int cmd2, cmd2_ADC, adctFiltered;
+int cmd1, cmd2;                      // normalized input values. -1000 to 1000
+double cmd1_ADC, cmd2_ADC;           // ADC input values
+double adcrFiltered, adctFiltered;
 
 // used if set in setup.c
 int autoSensorBaud2 = 0; // in USART2_IT_init
 int autoSensorBaud3 = 0; // in USART3_IT_init
 
+bool SoftWatchdogActive= false;
 bool ADCcontrolActive = false;
 
 int sensor_control = 0;
@@ -124,7 +128,12 @@ void poweroff() {
         enable = 0;
         for (int i = 0; i < 8; i++) {
             buzzerFreq = i;
-            HAL_Delay(100);
+            for(int j = 0; j < 100; j++) {
+                #ifdef SOFTWATCHDOG_TIMEOUT
+                    __HAL_TIM_SET_COUNTER(&htim3, 0); // Kick the Watchdog
+                #endif
+                HAL_Delay(1);
+            }
         }
         HAL_GPIO_WritePin(OFF_PORT, OFF_PIN, 0);
 
@@ -151,7 +160,40 @@ int dspeeds[2] = {0,0};
 // variables stored in flash
 // from flashcontent.h
 FLASH_CONTENT FlashContent;
-const FLASH_CONTENT FlashDefaults = FLASH_DEFAULTS;
+const FLASH_CONTENT FlashDefaults = {
+  .magic = CURRENT_MAGIC,
+  .PositionKpx100 = 50,
+  .PositionKix100 = 50,
+  .PositionKdx100 = 0,
+  .PositionPWMLimit = 1000,
+  .SpeedKpx100 = 20,
+  .SpeedKix100 = 10,
+  .SpeedKdx100 = 0,
+  .SpeedPWMIncrementLimit = 20,
+  .MaxCurrLim = 1500,
+  .HoverboardEnable = FLASH_DEFAULT_HOVERBOARD_ENABLE,
+  .calibration_0 = 0,
+  .calibration_1 = 0,
+  .HoverboardPWMLimit = 1000,
+  .adc.adc1_mult_neg = ADC1_MULT_NEG,
+  .adc.adc1_mult_pos = ADC1_MULT_POS,
+  .adc.adc1_min = ADC1_MIN,
+  .adc.adc1_zero = ADC1_ZERO,
+  .adc.adc1_max = ADC1_MAX,
+  .adc.adc2_min = ADC2_MIN,
+  .adc.adc2_zero = ADC2_ZERO,
+  .adc.adc2_max = ADC2_MAX,
+  .adc.adc2_mult_neg = ADC2_MULT_NEG,
+  .adc.adc2_mult_pos = ADC2_MULT_POS,
+  .adc.adc_off_start = ADC_OFF_START,
+  .adc.adc_off_end = ADC_OFF_END,
+  .adc.adc_off_filter = ADC_OFF_FILTER,
+  .adc.adc_relative_steer = ADC_RELATIVE_STEER,
+  .adc.adc_switch_channels = ADC_SWITCH_CHANNELS,
+  .adc.adc_reverse_steer = ADC_REVERSE_STEER,
+  .adc.adc_squared_steer = ADC_SQUARED_STEER,
+  .adc.adc_tankmode = ADC_TANKMODE,
+};
 
 
 typedef struct tag_PID_FLOATS{
@@ -329,8 +371,8 @@ int main(void) {
 
   #endif
 
-    // enables interrupt reading of hall sensors for dead reconing wheel position.
-    HallInterruptinit();
+  // enables interrupt reading of hall sensors for dead reconing wheel position.
+  HallInterruptinit();
 
   #ifdef CONTROL_PPM
     PPM_Init();
@@ -344,7 +386,15 @@ int main(void) {
 
 
   // sets up serial ports, and enables protocol on selected ports
-  setup_protocol();
+#if defined(SOFTWARE_SERIAL) && (INCLUDE_PROTOCOL == INCLUDE_PROTOCOL2)
+    setup_protocol(&sSoftwareSerial);
+#endif
+#if defined(SERIAL_USART2_IT) && (INCLUDE_PROTOCOL == INCLUDE_PROTOCOL2)
+    setup_protocol(&sUSART2);
+#endif
+#if defined(SERIAL_USART3_IT) && (INCLUDE_PROTOCOL == INCLUDE_PROTOCOL2) && !defined(CONTROL_SENSOR)
+    setup_protocol(&sUSART3);
+#endif
 
   int last_control_type = CONTROL_TYPE_NONE;
 
@@ -384,6 +434,11 @@ int main(void) {
   // uses timeStats.bldc_freq
   BldcControllerParams.callFrequency = timeStats.bldc_freq;
   BldcController_Init();
+
+#ifdef SOFTWATCHDOG_TIMEOUT
+  MX_TIM3_Softwatchdog_Init(); // Start the WAtchdog
+  SoftWatchdogActive= true;
+#endif
 
   while(1) {
     timeStats.time_in_us = timeStats.now_us;
@@ -474,28 +529,28 @@ int main(void) {
 #ifdef CONTROL_ADC
       // ADC values range: 0-4095, see ADC-calibration in config.h
 
-      adcrFiltered = adcrFiltered * (1.0 - ADC_OFF_FILTER) + adc_buffer.l_rx2 * ADC_OFF_FILTER;
-      adctFiltered = adctFiltered * (1.0 - ADC_OFF_FILTER) + adc_buffer.l_tx2 * ADC_OFF_FILTER;
+      adcrFiltered = adcrFiltered * (1.0 - FlashContent.adc.adc_off_filter ) + (double)adc_buffer.l_rx2 * FlashContent.adc.adc_off_filter;
+      adctFiltered = adctFiltered * (1.0 - FlashContent.adc.adc_off_filter ) + (double)adc_buffer.l_tx2 * FlashContent.adc.adc_off_filter;
 
 
 
-      if(adc_buffer.l_tx2 < ADC1_ZERO) {
-        cmd1_ADC = (CLAMP(adc_buffer.l_tx2, ADC1_MIN, ADC1_ZERO) - ADC1_ZERO) / ((ADC1_ZERO - ADC1_MIN) / ADC1_MULT_NEG); // ADC1 - Steer
+      if(adc_buffer.l_tx2 < FlashContent.adc.adc1_zero) {
+        cmd1_ADC = (double)(CLAMP(adc_buffer.l_tx2, FlashContent.adc.adc1_min, FlashContent.adc.adc1_zero) - FlashContent.adc.adc1_zero) / ((double)(FlashContent.adc.adc1_zero - FlashContent.adc.adc1_min) / FlashContent.adc.adc1_mult_neg); // ADC1 - Steer
       } else {
-        cmd1_ADC = (CLAMP(adc_buffer.l_tx2, ADC1_ZERO, ADC1_MAX) - ADC1_ZERO) / ((ADC1_MAX - ADC1_ZERO) / ADC1_MULT_POS); // ADC1 - Steer
+        cmd1_ADC = (double)(CLAMP(adc_buffer.l_tx2, FlashContent.adc.adc1_zero, FlashContent.adc.adc1_max) - FlashContent.adc.adc1_zero) / ((double)(FlashContent.adc.adc1_max - FlashContent.adc.adc1_zero) / FlashContent.adc.adc1_mult_pos); // ADC1 - Steer
       }
 
-      if(adc_buffer.l_rx2 < ADC2_ZERO) {
-        cmd2_ADC = (CLAMP(adc_buffer.l_rx2, ADC2_MIN, ADC2_ZERO) - ADC2_ZERO) / ((ADC2_ZERO - ADC2_MIN) / ADC2_MULT_NEG); // ADC2 - Speed
+      if(adc_buffer.l_rx2 < FlashContent.adc.adc2_zero) {
+        cmd2_ADC = (double)(CLAMP(adc_buffer.l_rx2, FlashContent.adc.adc2_min, FlashContent.adc.adc2_zero) - FlashContent.adc.adc2_zero) / ((double)(FlashContent.adc.adc2_zero - FlashContent.adc.adc2_min) / FlashContent.adc.adc2_mult_neg); // ADC2 - Speed
       } else {
-        cmd2_ADC = (CLAMP(adc_buffer.l_rx2, ADC2_ZERO, ADC2_MAX) - ADC2_ZERO) / ((ADC2_MAX - ADC2_ZERO) / ADC2_MULT_POS); // ADC2 - Speed
+        cmd2_ADC = (double)(CLAMP(adc_buffer.l_rx2, FlashContent.adc.adc2_zero, FlashContent.adc.adc2_max) - FlashContent.adc.adc2_zero) / ((double)(FlashContent.adc.adc2_max - FlashContent.adc.adc2_zero) / FlashContent.adc.adc2_mult_pos); // ADC2 - Speed
       }
 
-      if(ADC_SWITCH_CHANNELS) {
-        int cmdTemp = cmd1_ADC;
+      if(FlashContent.adc.adc_switch_channels) {
+        double cmdTemp = cmd1_ADC;
         cmd1_ADC = cmd2_ADC;
         cmd2_ADC = cmdTemp;
-        if((adctFiltered < ADC_OFF_START) || (adctFiltered > ADC_OFF_END) ) {
+        if((adctFiltered < FlashContent.adc.adc_off_start) || (adctFiltered > FlashContent.adc.adc_off_end) ) {
           ADCcontrolActive = true;
         } else {
           if(ADCcontrolActive) {
@@ -505,7 +560,7 @@ int main(void) {
           ADCcontrolActive = false;
         }
       } else {
-        if((adcrFiltered < ADC_OFF_START) || (adcrFiltered > ADC_OFF_END) ) {
+        if((adcrFiltered < FlashContent.adc.adc_off_start) || (adcrFiltered > FlashContent.adc.adc_off_end) ) {
           ADCcontrolActive = true;
         } else {
           if(ADCcontrolActive) {
@@ -516,9 +571,18 @@ int main(void) {
         }
       }
 
-      if(ADC_REVERSE_STEER) {
+      if(FlashContent.adc.adc_reverse_steer) {
         cmd1_ADC = -cmd1_ADC;
       }
+
+      if(FlashContent.adc.adc_squared_steer) {
+        cmd1_ADC = cmd1_ADC * fabs(cmd1_ADC);
+      }
+
+
+      cmd1_ADC = cmd1_ADC * (1.0 + (fabs(cmd2_ADC) * FlashContent.adc.adc_relative_steer));
+
+
       // use ADCs as button inputs:
       button1_ADC = (uint8_t)(adc_buffer.l_tx2 > 2000);  // ADC1
       button2_ADC = (uint8_t)(adc_buffer.l_rx2 > 2000);  // ADC2
@@ -678,9 +742,66 @@ int main(void) {
       }
 
       #if defined CONTROL_ADC
+
         if(ADCcontrolActive) {
+
+#ifdef ADC_SPEED_CONTROL
+          control_type = CONTROL_TYPE_SPEED;
+          SpeedData.wanted_speed_mm_per_sec[1] = CLAMP(speed * SPEED_COEFFICIENT -  steer * STEER_COEFFICIENT, -1000, 1000);
+          SpeedData.wanted_speed_mm_per_sec[0] = CLAMP(speed * SPEED_COEFFICIENT +  steer * STEER_COEFFICIENT, -1000, 1000);
+
+
+          if ((last_control_type != control_type) || (!enable)){
+            // nasty things happen if it's not re-initialised
+            init_PID_control();
+            last_control_type = control_type;
+          }
+
+
+
+
+
+              for (int i = 0; i < 2; i++){
+                // average speed over all the loops until pid_need_compute() returns !=0
+                SpeedPidFloats[i].in += HallData[i].HallSpeed_mm_per_s;
+                SpeedPidFloats[i].count++;
+                if (!enable){ // don't want anything building up
+                  SpeedPidFloats[i].in = 0;
+                  SpeedPidFloats[i].count = 1;
+                }
+                if (pid_need_compute(&SpeedPid[i])) {
+                  // Read process feedback
+                  int belowmin = 0;
+                  // won't work below about 45
+                  if (ABS(SpeedData.wanted_speed_mm_per_sec[i]) < SpeedData.speed_minimum_speed){
+                    SpeedPidFloats[i].set = 0;
+                    belowmin = 1;
+                  } else {
+                    SpeedPidFloats[i].set = SpeedData.wanted_speed_mm_per_sec[i];
+                  }
+                  SpeedPidFloats[i].in = SpeedPidFloats[i].in/(float)SpeedPidFloats[i].count;
+                  SpeedPidFloats[i].count = 0;
+                  // Compute new PID output value
+                  pid_compute(&SpeedPid[i]);
+                  //Change actuator value
+                  int pwm = SpeedPidFloats[i].out;
+                  if (belowmin){
+                    pwms[i] = 0;
+                  } else {
+                    pwms[i] =
+                      CLAMP(pwms[i] + pwm, -SpeedData.speed_max_power, SpeedData.speed_max_power);
+                  }
+                }
+              }
+
+#else
+
           cmd1 = cmd1_ADC;
           cmd2 = cmd2_ADC;
+
+#endif
+
+
           input_timeout_counter = 0;
         }
       #endif
@@ -711,8 +832,10 @@ int main(void) {
           pwms[0] = pwms[0] * (1.0 - FILTER) + cmd1 * FILTER;
           pwms[1] = pwms[1] * (1.0 - FILTER) + cmd2 * FILTER;
         } else {
-          pwms[0] = CLAMP(speed * SPEED_COEFFICIENT -  steer * STEER_COEFFICIENT, -1000, 1000);
-          pwms[1] = CLAMP(speed * SPEED_COEFFICIENT +  steer * STEER_COEFFICIENT, -1000, 1000);
+          #ifndef ADC_SPEED_CONTROL
+            pwms[0] = CLAMP(speed * SPEED_COEFFICIENT -  steer * STEER_COEFFICIENT, -1000, 1000);
+            pwms[1] = CLAMP(speed * SPEED_COEFFICIENT +  steer * STEER_COEFFICIENT, -1000, 1000);
+          #endif
         }
       }
 
@@ -906,9 +1029,22 @@ int main(void) {
     // move out '5ms' trigger on by 5ms
     timeStats.start_processing_us = timeStats.start_processing_us + timeStats.nominal_delay_us;
 
+#ifdef SOFTWATCHDOG_TIMEOUT
+    __HAL_TIM_SET_COUNTER(&htim3, 0); // Kick the Watchdog
+#endif
+
     ////////////////////////////////
     // increase input_timeout_counter
-    if(!enable_immediate) input_timeout_counter++;
+
+// TODO: What to do when multiple interfaces have the protocol attached?
+#ifdef SOFTWARE_SERIAL
+    if(!sSoftwareSerial.ascii.enable_immediate) input_timeout_counter++;
+#elif defined(SERIAL_USART2_IT)
+    if(!sUSART2.ascii.enable_immediate) input_timeout_counter++;
+#elif defined(SERIAL_USART3_IT) && !defined(CONTROL_SENSOR)
+    if(!sUSART3.ascii.enable_immediate) input_timeout_counter++;
+#endif
+
   }
 }
 
